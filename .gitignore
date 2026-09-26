@@ -1,0 +1,4 @@
+node_modules
+*.log
+.DS_Store
+# dist sengaja TIDAK di-ignore: di-commit supaya bisa di-install langsung dari GitHub
