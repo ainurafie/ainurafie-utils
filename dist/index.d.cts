@@ -28,15 +28,15 @@ declare function debounce<A extends unknown[]>(fn: (...args: A) => void, wait: n
  * NVX request signature.
  *
  * Canonical (digabung TANPA separator):
- *   METHOD + REQUEST URI + X-Request-Id + X-Platform + X-Timestamp + BODY TOKEN
+ *   METHOD + REQUEST URI + X-Request-Id + X-App-Id + X-Platform + X-Timestamp + BODY TOKEN
  *
  * Signature = HMAC-SHA256(canonical, secret) dalam hex.
+ * Sama dengan RequiredSignaturePublicHeaders default nvx-go-middleware (sejak 28/09/2026).
  *
- * Aturan body token:
- *   multipart/*                        -> "UNSIGNED"
- *   binary                             -> "UNSIGNED"
- *   body kosong                        -> "EMPTY"
- *   lainnya (JSON, text, urlencoded)   -> SHA256(body) dalam hex
+ * Aturan body token (ResolveBodyToken di nvx-go-middleware):
+ *   multipart/*   -> "UNSIGNED"
+ *   body kosong   -> "EMPTY"
+ *   lainnya       -> SHA256(byte body) dalam hex, termasuk binary
  *
  * X-Dev-Gateway-Key dikirim sebagai header tapi TIDAK masuk canonical.
  *
@@ -58,6 +58,8 @@ interface GenerateSignatureOptions {
     platform?: string;
     /** Prefix path yang ditambahkan ke URI saat signing, mis. `/gateway`. */
     pathPrefix?: string;
+    /** App id dari gateway shield, dikirim sebagai header `X-App-Id` dan masuk canonical. */
+    appId?: string;
     /** Jika diisi, ikut dikirim sebagai header `X-Dev-Gateway-Key`. */
     gatewayKey?: string;
     /** Default `crypto.randomUUID()`. */
@@ -69,12 +71,16 @@ interface SignatureResult {
     signature: string;
     method: string;
     requestId: string;
+    appId: string;
     platform: string;
     timestamp: string;
     requestURI: string;
     contentType: string;
-    /** Body persis seperti yang di-hash. Kirim string ini sebagai body request. */
-    body: string;
+    /**
+     * Body yang harus dikirim. JSON/object/URLSearchParams menjadi string persis seperti yang di-hash;
+     * FormData dan binary dikembalikan apa adanya.
+     */
+    body: string | FormData | Blob | ArrayBuffer | ArrayBufferView;
     bodyToken: string;
     canonical: string;
     /** Header siap pakai untuk request. */
@@ -86,6 +92,7 @@ interface SignatureResult {
  * @example
  * const { headers, body } = await generateSignature({
  *   secret: PUBLIC_KEY_SIGNATURE,
+ *   appId: APP_ID,
  *   gatewayKey: X_DEV_GATEWAY_KEY,
  *   method: "POST",
  *   url: "/api/users",
@@ -93,7 +100,7 @@ interface SignatureResult {
  * });
  * await fetch(BASE_URL + "/api/users", {
  *   method: "POST",
- *   headers: { "Content-Type": "application/json", ...headers },
+ *   headers, // sudah termasuk Content-Type
  *   body,
  * });
  */

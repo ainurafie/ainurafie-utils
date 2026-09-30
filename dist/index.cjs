@@ -72,15 +72,6 @@ async function getCrypto() {
 }
 
 // src/signature.ts
-var BINARY_TYPES = [
-  "application/octet-stream",
-  "application/pdf",
-  "application/zip",
-  "application/gzip",
-  "application/x-gzip",
-  "application/x-tar",
-  "application/wasm"
-];
 function normalizePathPrefix(prefix) {
   let p = (prefix ?? "").trim();
   if (!p || p === "/") return "";
@@ -102,31 +93,33 @@ function inferContentType(body) {
   if (body === null || body === void 0 || typeof body === "string") return "";
   if (typeof FormData !== "undefined" && body instanceof FormData) return "multipart/form-data";
   if (body instanceof URLSearchParams) return "application/x-www-form-urlencoded";
+  if (typeof Blob !== "undefined" && body instanceof Blob && body.type) return body.type;
   if (isBinaryBody(body)) return "application/octet-stream";
   return "application/json";
 }
 function isMultipart(contentType) {
   return contentType.trim().toLowerCase().startsWith("multipart/");
 }
-function isBinary(contentType) {
-  const ct = contentType.split(";")[0].trim().toLowerCase();
-  if (!ct) return false;
-  return BINARY_TYPES.includes(ct) || ct.startsWith("image/") || ct.startsWith("audio/") || ct.startsWith("video/");
-}
 function serializeBody(body) {
   if (body === null || body === void 0) return "";
   if (typeof body === "string") return body;
   if (body instanceof URLSearchParams) return body.toString();
-  if (typeof FormData !== "undefined" && body instanceof FormData) return "";
-  if (isBinaryBody(body)) return "";
+  if (typeof FormData !== "undefined" && body instanceof FormData) return body;
+  if (isBinaryBody(body)) return body;
   return JSON.stringify(body);
+}
+async function bodyBytes(body) {
+  if (typeof body === "string") return new TextEncoder().encode(body);
+  if (typeof Blob !== "undefined" && body instanceof Blob) return new Uint8Array(await body.arrayBuffer());
+  if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength).slice();
+  return new Uint8Array();
 }
 function toHex(buffer) {
   return Array.from(new Uint8Array(buffer), (b) => b.toString(16).padStart(2, "0")).join("");
 }
-async function sha256Hex(value) {
+async function sha256Hex(data) {
   const crypto = await getCrypto();
-  const data = new TextEncoder().encode(value);
   return toHex(await crypto.subtle.digest("SHA-256", data));
 }
 async function hmacSha256Hex(secret, message) {
@@ -142,21 +135,23 @@ async function hmacSha256Hex(secret, message) {
   return toHex(await crypto.subtle.sign("HMAC", key, encoder.encode(message)));
 }
 async function resolveBodyToken(contentType, body) {
-  if (isMultipart(contentType) || isBinary(contentType)) return "UNSIGNED";
-  if (body.length === 0) return "EMPTY";
-  return sha256Hex(body);
+  if (isMultipart(contentType)) return "UNSIGNED";
+  const bytes = await bodyBytes(body);
+  if (bytes.length === 0) return "EMPTY";
+  return sha256Hex(bytes);
 }
 async function generateSignature(options) {
   if (!options.secret) throw new Error("generateSignature: `secret` wajib diisi");
   const method = (options.method || "GET").toUpperCase();
   const platform = options.platform || "web";
   const requestId = options.requestId || (await getCrypto()).randomUUID();
+  const appId = options.appId ?? "";
   const timestamp = String(options.timestamp ?? Math.floor(Date.now() / 1e3));
   const requestURI = getRequestURI(options.url, options.pathPrefix);
   const contentType = options.contentType || inferContentType(options.body);
   const body = serializeBody(options.body);
   const bodyToken = await resolveBodyToken(contentType, body);
-  const canonical = [method, requestURI, requestId, platform, timestamp, bodyToken].join("");
+  const canonical = [method, requestURI, requestId, appId, platform, timestamp, bodyToken].join("");
   const signature = await hmacSha256Hex(options.secret, canonical);
   const headers = {
     "X-Request-Id": requestId,
@@ -164,11 +159,14 @@ async function generateSignature(options) {
     "X-Timestamp": timestamp,
     "X-Signature": signature
   };
+  if (contentType && !isMultipart(contentType)) headers["Content-Type"] = contentType;
+  if (appId) headers["X-App-Id"] = appId;
   if (options.gatewayKey) headers["X-Dev-Gateway-Key"] = options.gatewayKey;
   return {
     signature,
     method,
     requestId,
+    appId,
     platform,
     timestamp,
     requestURI,

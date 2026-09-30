@@ -2,15 +2,15 @@
  * NVX request signature.
  *
  * Canonical (digabung TANPA separator):
- *   METHOD + REQUEST URI + X-Request-Id + X-Platform + X-Timestamp + BODY TOKEN
+ *   METHOD + REQUEST URI + X-Request-Id + X-App-Id + X-Platform + X-Timestamp + BODY TOKEN
  *
  * Signature = HMAC-SHA256(canonical, secret) dalam hex.
+ * Sama dengan RequiredSignaturePublicHeaders default nvx-go-middleware (sejak 28/09/2026).
  *
- * Aturan body token:
- *   multipart/*                        -> "UNSIGNED"
- *   binary                             -> "UNSIGNED"
- *   body kosong                        -> "EMPTY"
- *   lainnya (JSON, text, urlencoded)   -> SHA256(body) dalam hex
+ * Aturan body token (ResolveBodyToken di nvx-go-middleware):
+ *   multipart/*   -> "UNSIGNED"
+ *   body kosong   -> "EMPTY"
+ *   lainnya       -> SHA256(byte body) dalam hex, termasuk binary
  *
  * X-Dev-Gateway-Key dikirim sebagai header tapi TIDAK masuk canonical.
  *
@@ -46,6 +46,8 @@ export interface GenerateSignatureOptions {
   platform?: string;
   /** Prefix path yang ditambahkan ke URI saat signing, mis. `/gateway`. */
   pathPrefix?: string;
+  /** App id dari gateway shield, dikirim sebagai header `X-App-Id` dan masuk canonical. */
+  appId?: string;
   /** Jika diisi, ikut dikirim sebagai header `X-Dev-Gateway-Key`. */
   gatewayKey?: string;
   /** Default `crypto.randomUUID()`. */
@@ -58,27 +60,21 @@ export interface SignatureResult {
   signature: string;
   method: string;
   requestId: string;
+  appId: string;
   platform: string;
   timestamp: string;
   requestURI: string;
   contentType: string;
-  /** Body persis seperti yang di-hash. Kirim string ini sebagai body request. */
-  body: string;
+  /**
+   * Body yang harus dikirim. JSON/object/URLSearchParams menjadi string persis seperti yang di-hash;
+   * FormData dan binary dikembalikan apa adanya.
+   */
+  body: string | FormData | Blob | ArrayBuffer | ArrayBufferView;
   bodyToken: string;
   canonical: string;
   /** Header siap pakai untuk request. */
   headers: Record<string, string>;
 }
-
-const BINARY_TYPES = [
-  "application/octet-stream",
-  "application/pdf",
-  "application/zip",
-  "application/gzip",
-  "application/x-gzip",
-  "application/x-tar",
-  "application/wasm",
-];
 
 function normalizePathPrefix(prefix: string | undefined): string {
   let p = (prefix ?? "").trim();
@@ -108,6 +104,7 @@ function inferContentType(body: SignatureBody): string {
   if (body === null || body === undefined || typeof body === "string") return "";
   if (typeof FormData !== "undefined" && body instanceof FormData) return "multipart/form-data";
   if (body instanceof URLSearchParams) return "application/x-www-form-urlencoded";
+  if (typeof Blob !== "undefined" && body instanceof Blob && body.type) return body.type;
   if (isBinaryBody(body)) return "application/octet-stream";
   return "application/json";
 }
@@ -116,34 +113,31 @@ function isMultipart(contentType: string): boolean {
   return contentType.trim().toLowerCase().startsWith("multipart/");
 }
 
-function isBinary(contentType: string): boolean {
-  const ct = contentType.split(";")[0].trim().toLowerCase();
-  if (!ct) return false;
-  return (
-    BINARY_TYPES.includes(ct) ||
-    ct.startsWith("image/") ||
-    ct.startsWith("audio/") ||
-    ct.startsWith("video/")
-  );
-}
-
-/** Ubah body menjadi string yang akan di-hash. Multipart/binary -> "". */
-function serializeBody(body: SignatureBody): string {
+/** Body yang dikirim. Selain FormData dan binary, body diubah menjadi string. */
+function serializeBody(body: SignatureBody): SignatureResult["body"] {
   if (body === null || body === undefined) return "";
   if (typeof body === "string") return body;
   if (body instanceof URLSearchParams) return body.toString();
-  if (typeof FormData !== "undefined" && body instanceof FormData) return "";
-  if (isBinaryBody(body)) return "";
+  if (typeof FormData !== "undefined" && body instanceof FormData) return body;
+  if (isBinaryBody(body)) return body;
   return JSON.stringify(body);
+}
+
+/** Byte body yang di-hash server. FormData tidak perlu (selalu "UNSIGNED"). */
+async function bodyBytes(body: SignatureResult["body"]): Promise<Uint8Array<ArrayBuffer>> {
+  if (typeof body === "string") return new TextEncoder().encode(body);
+  if (typeof Blob !== "undefined" && body instanceof Blob) return new Uint8Array(await body.arrayBuffer());
+  if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength).slice();
+  return new Uint8Array();
 }
 
 function toHex(buffer: ArrayBuffer): string {
   return Array.from(new Uint8Array(buffer), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function sha256Hex(value: string): Promise<string> {
+async function sha256Hex(data: Uint8Array<ArrayBuffer>): Promise<string> {
   const crypto = await getCrypto();
-  const data = new TextEncoder().encode(value);
   return toHex(await crypto.subtle.digest("SHA-256", data));
 }
 
@@ -160,10 +154,11 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   return toHex(await crypto.subtle.sign("HMAC", key, encoder.encode(message)));
 }
 
-async function resolveBodyToken(contentType: string, body: string): Promise<string> {
-  if (isMultipart(contentType) || isBinary(contentType)) return "UNSIGNED";
-  if (body.length === 0) return "EMPTY";
-  return sha256Hex(body);
+async function resolveBodyToken(contentType: string, body: SignatureResult["body"]): Promise<string> {
+  if (isMultipart(contentType)) return "UNSIGNED";
+  const bytes = await bodyBytes(body);
+  if (bytes.length === 0) return "EMPTY";
+  return sha256Hex(bytes);
 }
 
 /**
@@ -172,6 +167,7 @@ async function resolveBodyToken(contentType: string, body: string): Promise<stri
  * @example
  * const { headers, body } = await generateSignature({
  *   secret: PUBLIC_KEY_SIGNATURE,
+ *   appId: APP_ID,
  *   gatewayKey: X_DEV_GATEWAY_KEY,
  *   method: "POST",
  *   url: "/api/users",
@@ -179,7 +175,7 @@ async function resolveBodyToken(contentType: string, body: string): Promise<stri
  * });
  * await fetch(BASE_URL + "/api/users", {
  *   method: "POST",
- *   headers: { "Content-Type": "application/json", ...headers },
+ *   headers, // sudah termasuk Content-Type
  *   body,
  * });
  */
@@ -191,13 +187,14 @@ export async function generateSignature(
   const method = (options.method || "GET").toUpperCase();
   const platform = options.platform || "web";
   const requestId = options.requestId || (await getCrypto()).randomUUID();
+  const appId = options.appId ?? "";
   const timestamp = String(options.timestamp ?? Math.floor(Date.now() / 1000));
   const requestURI = getRequestURI(options.url, options.pathPrefix);
   const contentType = options.contentType || inferContentType(options.body);
   const body = serializeBody(options.body);
   const bodyToken = await resolveBodyToken(contentType, body);
 
-  const canonical = [method, requestURI, requestId, platform, timestamp, bodyToken].join("");
+  const canonical = [method, requestURI, requestId, appId, platform, timestamp, bodyToken].join("");
   const signature = await hmacSha256Hex(options.secret, canonical);
 
   const headers: Record<string, string> = {
@@ -206,12 +203,17 @@ export async function generateSignature(
     "X-Timestamp": timestamp,
     "X-Signature": signature,
   };
+  // Server menghitung body token dari header Content-Type, jadi kirim nilai yang sama.
+  // Multipart dilewati: boundary-nya diisi otomatis oleh fetch/browser.
+  if (contentType && !isMultipart(contentType)) headers["Content-Type"] = contentType;
+  if (appId) headers["X-App-Id"] = appId;
   if (options.gatewayKey) headers["X-Dev-Gateway-Key"] = options.gatewayKey;
 
   return {
     signature,
     method,
     requestId,
+    appId,
     platform,
     timestamp,
     requestURI,
