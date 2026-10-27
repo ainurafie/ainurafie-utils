@@ -120,17 +120,29 @@ async function sha256Hex(data) {
   const crypto = await getCrypto();
   return toHex(await crypto.subtle.digest("SHA-256", data));
 }
+function lengthPrefixed(parts) {
+  const encoder = new TextEncoder();
+  const encoded = parts.map((part) => encoder.encode(part));
+  const out = new Uint8Array(encoded.reduce((total, bytes) => total + 8 + bytes.length, 0));
+  const view = new DataView(out.buffer);
+  let offset = 0;
+  for (const bytes of encoded) {
+    view.setBigUint64(offset, BigInt(bytes.length));
+    out.set(bytes, offset + 8);
+    offset += 8 + bytes.length;
+  }
+  return out;
+}
 async function hmacSha256Hex(secret, message) {
   const crypto = await getCrypto();
-  const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(secret),
+    new TextEncoder().encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
   );
-  return toHex(await crypto.subtle.sign("HMAC", key, encoder.encode(message)));
+  return toHex(await crypto.subtle.sign("HMAC", key, message));
 }
 async function resolveBodyToken(contentType, body) {
   if (isMultipart(contentType)) return "UNSIGNED";
@@ -149,8 +161,9 @@ async function generateSignature(options) {
   const contentType = options.contentType || inferContentType(options.body);
   const body = serializeBody(options.body);
   const bodyToken = await resolveBodyToken(contentType, body);
-  const canonical = [method, requestURI, requestId, appId, platform, timestamp, bodyToken].join("");
-  const signature = await hmacSha256Hex(options.secret, canonical);
+  const parts = [method, requestURI, requestId, appId, platform, timestamp, bodyToken];
+  const canonical = parts.join("");
+  const signature = await hmacSha256Hex(options.secret, lengthPrefixed(parts));
   const headers = {
     "X-Request-Id": requestId,
     "X-Platform": platform,

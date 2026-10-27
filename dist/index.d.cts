@@ -27,11 +27,13 @@ declare function debounce<A extends unknown[]>(fn: (...args: A) => void, wait: n
 /**
  * NVX request signature.
  *
- * Canonical (digabung TANPA separator):
- *   METHOD + REQUEST URI + X-Request-Id + X-App-Id + X-Platform + X-Timestamp + BODY TOKEN
- *
- * Signature = HMAC-SHA256(canonical, secret) dalam hex.
+ * Bagian canonical, berurutan:
+ *   METHOD, REQUEST URI, X-Request-Id, X-App-Id, X-Platform, X-Timestamp, BODY TOKEN
  * Sama dengan RequiredSignaturePublicHeaders default nvx-go-middleware (sejak 28/09/2026).
+ *
+ * Signature = HMAC-SHA256 dalam hex atas tiap bagian yang diawali panjangnya: 8 byte big-endian
+ * (panjang byte UTF-8) lalu isi bagiannya. Sama dengan cryptoutil.Signature nvx-go-helper sejak
+ * 7e7b3e1 (25/10/2026); sebelumnya bagian-bagian digabung tanpa separator dan tanpa prefix panjang.
  *
  * Aturan body token (ResolveBodyToken di nvx-go-middleware):
  *   multipart/*   -> "UNSIGNED"
@@ -82,6 +84,7 @@ interface SignatureResult {
      */
     body: string | FormData | Blob | ArrayBuffer | ArrayBufferView;
     bodyToken: string;
+    /** Bagian-bagian canonical digabung tanpa separator, hanya untuk debug (yang di-HMAC versi length-prefixed). */
     canonical: string;
     /** Header siap pakai untuk request. */
     headers: Record<string, string>;

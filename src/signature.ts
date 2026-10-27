@@ -1,11 +1,13 @@
 /**
  * NVX request signature.
  *
- * Canonical (digabung TANPA separator):
- *   METHOD + REQUEST URI + X-Request-Id + X-App-Id + X-Platform + X-Timestamp + BODY TOKEN
- *
- * Signature = HMAC-SHA256(canonical, secret) dalam hex.
+ * Bagian canonical, berurutan:
+ *   METHOD, REQUEST URI, X-Request-Id, X-App-Id, X-Platform, X-Timestamp, BODY TOKEN
  * Sama dengan RequiredSignaturePublicHeaders default nvx-go-middleware (sejak 28/09/2026).
+ *
+ * Signature = HMAC-SHA256 dalam hex atas tiap bagian yang diawali panjangnya: 8 byte big-endian
+ * (panjang byte UTF-8) lalu isi bagiannya. Sama dengan cryptoutil.Signature nvx-go-helper sejak
+ * 7e7b3e1 (25/10/2026); sebelumnya bagian-bagian digabung tanpa separator dan tanpa prefix panjang.
  *
  * Aturan body token (ResolveBodyToken di nvx-go-middleware):
  *   multipart/*   -> "UNSIGNED"
@@ -71,6 +73,7 @@ export interface SignatureResult {
    */
   body: string | FormData | Blob | ArrayBuffer | ArrayBufferView;
   bodyToken: string;
+  /** Bagian-bagian canonical digabung tanpa separator, hanya untuk debug (yang di-HMAC versi length-prefixed). */
   canonical: string;
   /** Header siap pakai untuk request. */
   headers: Record<string, string>;
@@ -141,17 +144,31 @@ async function sha256Hex(data: Uint8Array<ArrayBuffer>): Promise<string> {
   return toHex(await crypto.subtle.digest("SHA-256", data));
 }
 
-async function hmacSha256Hex(secret: string, message: string): Promise<string> {
-  const crypto = await getCrypto();
+/** Tiap bagian diawali panjang byte-nya (uint64 big-endian), seperti cryptoutil.Signature di nvx-go-helper. */
+function lengthPrefixed(parts: string[]): Uint8Array<ArrayBuffer> {
   const encoder = new TextEncoder();
+  const encoded = parts.map((part) => encoder.encode(part));
+  const out = new Uint8Array(encoded.reduce((total, bytes) => total + 8 + bytes.length, 0));
+  const view = new DataView(out.buffer);
+  let offset = 0;
+  for (const bytes of encoded) {
+    view.setBigUint64(offset, BigInt(bytes.length));
+    out.set(bytes, offset + 8);
+    offset += 8 + bytes.length;
+  }
+  return out;
+}
+
+async function hmacSha256Hex(secret: string, message: Uint8Array<ArrayBuffer>): Promise<string> {
+  const crypto = await getCrypto();
   const key = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(secret),
+    new TextEncoder().encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
   );
-  return toHex(await crypto.subtle.sign("HMAC", key, encoder.encode(message)));
+  return toHex(await crypto.subtle.sign("HMAC", key, message));
 }
 
 async function resolveBodyToken(contentType: string, body: SignatureResult["body"]): Promise<string> {
@@ -194,8 +211,9 @@ export async function generateSignature(
   const body = serializeBody(options.body);
   const bodyToken = await resolveBodyToken(contentType, body);
 
-  const canonical = [method, requestURI, requestId, appId, platform, timestamp, bodyToken].join("");
-  const signature = await hmacSha256Hex(options.secret, canonical);
+  const parts = [method, requestURI, requestId, appId, platform, timestamp, bodyToken];
+  const canonical = parts.join("");
+  const signature = await hmacSha256Hex(options.secret, lengthPrefixed(parts));
 
   const headers: Record<string, string> = {
     "X-Request-Id": requestId,

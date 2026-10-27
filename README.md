@@ -34,8 +34,10 @@ await sleep(500);
 
 ## Signature NVX
 
-Canonical: `METHOD + URI + X-Request-Id + X-App-Id + X-Platform + X-Timestamp + BODY TOKEN`, sama dengan
-`RequiredSignaturePublicHeaders` default nvx-go-middleware. Body token: multipart `UNSIGNED`, body kosong `EMPTY`,
+Bagian canonical: `METHOD`, `URI`, `X-Request-Id`, `X-App-Id`, `X-Platform`, `X-Timestamp`, `BODY TOKEN`, sama dengan
+`RequiredSignaturePublicHeaders` default nvx-go-middleware. Signature = HMAC-SHA256 (hex) atas tiap bagian yang diawali
+panjang byte-nya (uint64 big-endian), sama dengan `cryptoutil.Signature` nvx-go-helper sejak 7e7b3e1 (25/10/2026).
+Versi 0.2.0 ke bawah menggabung bagian tanpa prefix panjang dan ditolak server yang memakai nvx-go-helper baru. Body token: multipart `UNSIGNED`, body kosong `EMPTY`,
 selain itu SHA256 byte body (termasuk binary).
 
 ```ts
